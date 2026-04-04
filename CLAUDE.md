@@ -58,7 +58,7 @@ When spawning teammates, always pass the relevant file paths so they have full c
 
 Not all paths exist in every phase — pass what's available. Early phases won't have PLAN.md yet.
 
-Teammates do not inherit CLAUDE.md — they start with a blank context. Every teammate prompt must include these standard instructions:
+Teammates start with a fresh conversation context. Every teammate prompt must include these standard instructions:
 - Project working directory path (e.g., `./workspace/flash-attention-2/`)
 - Tool conventions: "use `uv` for all Python operations — never use `pip`"
 - Their name, role, and team name
