@@ -5,7 +5,7 @@ description: Download and deeply explore an arxiv paper as the first step of an 
 
 # Paper Explore
 
-The goal is to get the paper onto disk and build a thorough understanding of it before writing any code. This skill uses two agents in sequence — download first, then explore.
+The goal is to get the paper onto disk and build a thorough understanding of it before writing any code. This skill uses three agents — download, explore (researcher), and critique — with the researcher and critic communicating directly.
 
 ## Workflow
 
@@ -15,6 +15,25 @@ Spawn the `paper-download` agent (subagent_type: `paper-download`). Pass it the 
 
 Wait for the download agent to complete before proceeding.
 
-**Step 2 — Explore**
+**Step 2 — Explore + Critique (direct loop)**
 
-Spawn the `paper-explore` agent (subagent_type: `paper-explore`). Pass it the project directory path and the paths to the downloaded files in `./paper/`.
+Spawn both agents, giving each the other's name so they can communicate directly:
+
+1. **Researcher** (subagent_type: `paper-explore`, name: `researcher`): Pass it the project directory path and the paths to the downloaded files in `./paper/`. Instruct it to:
+   - Read the paper and write notes to `./notes/note-01-paper-exploration.md`
+   - When done, send `SendMessage(to: "paper-note-critic", message: {type: "ready_for_review"})` with a summary of what was produced
+
+2. **Paper-note-critic** (subagent_type: `general-purpose`, name: `paper-note-critic`): Pass it the project directory path. Instruct it to:
+   - Wait for the researcher's `ready_for_review` signal
+   - Read the paper (`./paper/`) and the researcher's notes (`./notes/note-01-paper-exploration.md`)
+   - Check that notes faithfully reflect the paper — flag missing details, inaccuracies, and missing source references
+   - Run the direct critique loop with the researcher (max 2 iterations):
+     - Send `SendMessage(to: "researcher", message: {type: "revision_needed", feedback: "..."})` with specific feedback, or `{type: "accepted"}` if no changes needed
+     - Wait for researcher's `{type: "revision_done"}` if revisions were requested
+   - After acceptance, send `SendMessage(to: "team-lead", message: {type: "loop_complete"})` to signal completion
+
+Both agents can be spawned in parallel — the critic will wait for the researcher's signal before starting review.
+
+**Step 3 — Review**
+
+After receiving `loop_complete`, review the final `note-01-paper-exploration.md` and update task note frontmatter.

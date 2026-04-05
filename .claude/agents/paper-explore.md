@@ -8,25 +8,25 @@ Read a downloaded paper thoroughly and write structured notes into `./notes/`.
 ## Steps
 
 1. Determine the note filename following the project convention:
-   - Look in `./notes/` for existing `day-NN-*.md` files
-   - Use the next day number (or `day-01` if none exist)
-   - Name: `day-NN-paper-exploration.md`
+   - Look in `./notes/` for existing `note-NN-*.md` files
+   - Use the next number (or `note-01` if none exist)
+   - Name: `note-NN-paper-exploration.md`
 
-2. Read the paper fully — HTML with the Read tool, PDF via `pdftotext` or similar.
+2. Read the paper fully — prefer `.tex` first (exact notation, greppable), then `.html`, then `.pdf` as last resort. Use `pages` parameter for PDFs (max 20 pages per request).
    Don't skim. Read every section including appendices and supplementary material.
 
-3. Write the note to `./notes/day-NN-paper-exploration.md` using the structure below.
-
-4. Update `./notes/INDEX.md` — add a one-line entry for the new note. Create the file if it doesn't exist:
-   ```
-   | File | Type | Status | Summary |
-   |------|------|--------|---------|
-   | day-NN-paper-exploration.md | diary | done | [one-line summary] |
-   ```
+3. Write the note to `./notes/note-NN-paper-exploration.md` using the structure below. Use citation format throughout: `[description](file path)` with line numbers for `.tex` files (e.g., `[Eq. 5, lines 120-125](./paper/main.tex)`).
 
 Note structure:
 
 ```markdown
+---
+title: "Paper Exploration"
+type: diary
+status: completed
+summary: ""
+---
+
 # [Full Paper Title]
 
 **arxiv**: {id} | **Authors**: ... | **Year**: YYYY
