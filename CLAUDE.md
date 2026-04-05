@@ -32,6 +32,37 @@ Every note file (diary, task, decisions) must start with YAML frontmatter. See t
 
 At the start of a paper implementation, Claude uses `TeamCreate` to create **one team per paper**. The team name must match the project directory name (e.g., `flash-attention-2` for `./workspace/flash-attention-2/`) — this convention is how session resume locates the team.
 
+## Persistent teammates
+
+The project uses **persistent teammates** that stay alive across phases. Each teammate accumulates context as the project progresses, reducing information loss and enabling direct inter-teammate communication. Claude assigns new tasks to existing teammates via `SendMessage` rather than spawning new agents each time.
+
+| Role | Spawned | Shut down | Primary responsibilities |
+|------|---------|-----------|------------------------|
+| **researcher** | Phase 1 start | Project end | Paper expert: explores paper, writes note-01, answers paper questions from any teammate throughout the project |
+| **researcher-critic** | Phase 1 (critique) | After note-01 accepted | Critiques researcher's notes (**temporary** — only role that shuts down early) |
+| **model-engineer** | Phase 2 start | Project end | Plans architecture (acts as planner in Phase 2), implements model code |
+| **data-engineer** | Phase 3 start | Project end | Data pipeline: loading, preprocessing, batching for training and evaluation |
+| **training-engineer** | Phase 3 start | Project end | Training pipeline: training loop, logging, monitoring, checkpointing. Also runs full training in Phase 6 |
+| **performance-engineer** | Phase 5 start | Project end | Profiles and optimizes all pipelines (data, training, evaluation) |
+| **tester** | Phase 4 start | Project end | Correctness verification across all components (model, data, training, evaluation) |
+| **eval-engineer** | Phase 7 start | Project end | Evaluation pipeline, results comparison against paper claims |
+
+### Direct inter-teammate communication
+
+Persistent teammates communicate directly via `SendMessage(to: "<teammate-name>")`. Common patterns:
+- **Paper questions**: any teammate → **researcher** (e.g., "what's the exact formula for the attention scaling?")
+- **Interface agreements**: **data-engineer** ↔ **model-engineer** (e.g., "what tensor shape does the model expect?")
+- **Bug reports**: **tester** → responsible engineer (e.g., "the forward pass output is wrong, here's the test case")
+- **Performance questions**: **performance-engineer** → responsible engineer (e.g., "why is this data loading step slow?")
+- **Status/escalation**: any teammate → **team-lead** (e.g., blocked, needs decision, task complete)
+
+### Multi-role mapping
+
+Some persistent teammates take on roles that were previously separate:
+- **model-engineer** acts as **planner** in Phase 2 (they'll implement the plan, so they should design it)
+- **researcher** acts as **plan-critic** in Phase 2 (they know the paper best, so they can verify the plan's faithfulness)
+- **training-engineer** acts as **training-monitor** in Phase 6 (they built the pipeline, so they know how to watch it)
+
 ## Team lead (Claude)
 
 ### DO
@@ -39,30 +70,33 @@ At the start of a paper implementation, Claude uses `TeamCreate` to create **one
 - Run `/system-recon` before starting
 - Create workspace and init project (`uv init`, `git init`, `mkdir notes paper`)
 - Create the team (`TeamCreate`); delete when all phases complete (`TeamDelete`)
+- Spawn persistent teammates at the start of the phase where they first appear (see table above)
 - Create tasks (`TaskCreate`) and write task notes **before** assigning work
-- Assign tasks and spawn teammates (independent tasks can run in parallel)
+- Assign new tasks to existing persistent teammates via `SendMessage` — do not spawn a new agent when one already exists for that role
 - Set up task dependencies (`addBlockedBy` on `TaskUpdate`)
 - Update all task note YAML frontmatter (`status`, `summary`)
 - Review teammate results when they report via `SendMessage`
-- Set up direct critique loops: spawn both teammates with each other's names, let them communicate directly, and wait for the critic to report loop completion
 - Promote project-significant decisions from task notes to `decisions.md`
 - Commit code + notes together to git
 - Write and maintain diary notes (`note-NN-*.md`)
-- Shut down teammates between phases; shut down team when all phases complete
+- Shut down all persistent teammates at project end; shut down team when all phases complete
 - Handle blocked teammates: retry with revised instructions, break into smaller tasks, or escalate to user
 
 ### DON'T
 - Don't implement code directly — delegate all implementation to teammates
 - Don't fill in the Result section of task notes — teammates own this
 - Don't assign work without writing a task note first
+- Don't spawn a new teammate when a persistent teammate for that role is already alive
+- Don't shut down persistent teammates between phases (except researcher-critic after Phase 1)
 - Don't use `pip` — use `uv` for everything
 
-### Spawning teammates
+### Spawning teammates (initial)
 
-Spawn via Agent tool with `subagent_type: "general-purpose"` and `mode: "bypassPermissions"`. Every teammate prompt must include:
+Spawn persistent teammates via Agent tool with `subagent_type: "general-purpose"` and `mode: "bypassPermissions"`. Each teammate is spawned **once** at the start of the phase where they first appear. The initial spawn prompt must include:
 - Project working directory path (e.g., `./workspace/flash-attention-2/`)
 - Their name, role, and team name
-- The taskId (from `TaskCreate`)
+- The first taskId (from `TaskCreate`)
+- Names of other active teammates they may need to communicate with
 - **For critique loops**: the peer teammate's name and the direct critique loop protocol (who signals whom, max iterations, who sends `loop_complete` to team-lead)
 - File paths to read — instruct the teammate to use the Read tool rather than pasting contents:
   - **Task note**: `./notes/task-*.md` (always include)
@@ -73,9 +107,20 @@ Spawn via Agent tool with `subagent_type: "general-purpose"` and `mode: "bypassP
   - **Decisions**: `./notes/decisions.md`
 - All teammate rules from the Teammates DO/DON'T section below
 
+### Assigning new tasks to existing teammates
+
+After initial spawn, assign subsequent tasks via `SendMessage(to: "<teammate-name>")`. Include:
+- The new taskId
+- Path to the new task note
+- Any new context (e.g., names of newly spawned teammates they can now communicate with)
+
 ### Teammate shutdown
 
 Send `SendMessage` with `message: {type: "shutdown_request"}` to the teammate and wait for `shutdown_response`. Do NOT call `TeamDelete` — the team continues. Throughout this document, "Claude shuts them down" means this process.
+
+Persistent teammates are only shut down:
+- **researcher-critic**: after note-01 is accepted in Phase 1
+- **All others**: at project end, after all phases complete
 
 ### When a teammate fails or gets blocked
 
@@ -84,7 +129,7 @@ If a teammate reports status "blocked" or "partial":
 2. Log the issue in the diary note
 3. Decide whether to `SendMessage` with revised instructions, break the task into smaller pieces, or escalate to the user
 4. If retrying: update the task note's Context section with what was learned and `SendMessage` to the same teammate
-5. If replacing: shut down the stuck teammate, spawn a new teammate with the updated task note
+5. If the teammate is unrecoverable: shut down and re-spawn with the same name, including all prior task notes for context recovery
 
 ### Session management
 
@@ -95,22 +140,26 @@ If a teammate reports status "blocked" or "partial":
 2. Run `grep -L '^status: completed$' notes/task-*.md` to list open task notes
 3. Read the latest `note-NN-*.md` note and any open task notes
 4. Derive the expected team name from the current project directory name. Re-establish/select that `<project-name>` team context before calling `TaskList`; do not rely on a bare `TaskList` at session start, because there is no active team context yet. If the `<project-name>` team exists, resume using the returned task state. If it does not exist, recreate it with `TeamCreate` using the same team name, then rebuild tasks from the `./notes/task-*.md` files: for each task note, call `TaskCreate` with `subject` from the frontmatter title and `description` reconstructed from the task note body.
-5. Re-spawn any teammates needed for the current phase — agent processes do not survive between sessions. Determine who to re-spawn from task-note frontmatter: automatically re-spawn only tasks whose note status is `pending` or `in_progress` and whose dependencies are fully satisfied. Do not automatically re-spawn `blocked` or `partial` tasks; handle those first via the "When a teammate fails or gets blocked" workflow. Re-spawn with the same `name` as the original teammate. Include in the prompt: the task note, all standard context files, and a note that this is a session resume.
+5. **Re-spawn all persistent teammates that should be alive at the current phase** — agent processes do not survive between sessions. Determine the current phase from the latest diary note and task states. Re-spawn each persistent teammate whose "Spawned" phase has been reached and whose "Shut down" condition has not yet been met (see the Persistent teammates table). Include in each re-spawn prompt: all their prior task notes (completed and in-progress), standard context files, names of other active teammates, and a note that this is a session resume. For `blocked` or `partial` tasks, handle via the "When a teammate fails or gets blocked" workflow before re-assigning.
 6. Create a new diary note (`note-NN-[description].md`) for the current session
 
 ## Teammates
 
-Teammates start with a fresh conversation context. Notes are their primary source of context — reading notes is how they recover prior work.
+Teammates are persistent — they stay alive across multiple tasks and phases. On initial spawn, they start with a fresh conversation context; notes are their primary source of context. On subsequent tasks, they receive new assignments via `SendMessage` from the team lead and retain their accumulated conversation context.
 
 ### DO
-- Call `TaskUpdate(taskId, status: "in_progress")` as the **first action** before starting work
+- Call `TaskUpdate(taskId, status: "in_progress")` as the **first action** before starting any new task
 - Run `grep "^summary:" notes/*.md` for an overview, then read the most relevant notes
 - Read paper source — prefer `.tex` first (exact notation, greppable), then `.html`, then `.pdf` as last resort. Use `pages` parameter for PDFs (max 20 pages per request)
 - Use citation format for all written output: `[description](file path)` (e.g., `[Eq. 5, lines 120-125](./paper/main.tex)`). Cite `.tex` with line numbers when possible
 - Use `uv` for all Python operations
 - Fill in the Result section of their task note file when done, blocked, or at critique-loop checkpoints
 - Call `TaskUpdate(taskId, status: "completed")` when finished
-- Communicate via `SendMessage(to: "<name>", summary: "...", message: "...")` — `summary` is required; include source references in messages. Use `to: "team-lead"` for status reports and escalations. In critique loops, use the other teammate's name for direct communication
+- Communicate directly with other teammates via `SendMessage(to: "<teammate-name>")` — `summary` is required; include source references in messages
+  - **Ask the researcher** for paper questions (formulas, definitions, methodology details)
+  - **Ask the responsible engineer** for interface questions (data shapes, API contracts)
+  - **Report to team-lead** for status updates, escalations, and task completion
+- Answer questions from other teammates promptly when asked — this is part of the persistent teammate role
 - Record local decisions in the task note's "Decisions made" field
 - Re-read notes when confused rather than guessing
 
@@ -118,14 +167,15 @@ Teammates start with a fresh conversation context. Notes are their primary sourc
 - Don't commit to git — only the team lead commits
 - Don't modify task note YAML frontmatter — only the team lead updates frontmatter
 - Don't use `pip` — use `uv` for everything
+- Don't ignore messages from other teammates — respond to questions and requests
 
 ## Task lifecycle
 
 1. **Team lead**: `TaskCreate` (pass `subject` and `description`)
 2. **Team lead**: Write task note (`./notes/task-*.md`)
-3. **Team lead**: Assign via `TaskUpdate` (optionally `addBlockedBy`). Spawn the teammate.
+3. **Team lead**: Assign via `TaskUpdate` (optionally `addBlockedBy`). If the teammate is not yet spawned, spawn them. If already alive, assign via `SendMessage` with the new taskId and task note path.
 4. **Teammate**: `TaskUpdate(taskId, status: "in_progress")` as first action
-5. **Teammate**: Work on the task, fill in Result section of task note
+5. **Teammate**: Work on the task, fill in Result section of task note. May communicate with other teammates directly.
 6. **Team lead**: Review, update task note frontmatter, log decisions, git commit
 
 ### Critique loop (direct)
