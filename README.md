@@ -5,7 +5,7 @@ A Claude Code setup that implements ML papers from arxiv. Give it a paper, it or
 ## Usage
 
 ```
-tmux new-session claude --dangerously-skip-permissions "implement 2307.08691"
+tmux new-session claude --dangerously-skip-permissions --settings-sources project "implement 2307.08691"
 ```
 
 Or paste an arxiv URL or describe a paper. Claude handles the rest. tmux is required for agent teams to work.
