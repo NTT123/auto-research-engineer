@@ -19,11 +19,12 @@ Wait for the download agent to complete before proceeding.
 
 Spawn both agents, giving each the other's name so they can communicate directly:
 
-1. **Researcher** (subagent_type: `paper-explore`, name: `researcher`): Pass it the project directory path and the paths to the downloaded files in `./paper/`. Instruct it to:
+1. **Researcher** (subagent_type: `paper-explore`, name: `researcher`): This is a **persistent teammate** — it stays alive for the rest of the project to answer paper questions from other teammates. Pass it the project directory path and the paths to the downloaded files in `./paper/`. Instruct it to:
    - Read the paper and write notes to `./notes/note-01-paper-exploration.md`
-   - When done, send `SendMessage(to: "paper-note-critic", message: {type: "ready_for_review"})` with a summary of what was produced
+   - When done, send `SendMessage(to: "researcher-critic", message: {type: "ready_for_review"})` with a summary of what was produced
+   - After the critique loop, remain alive to answer paper questions from other teammates
 
-2. **Paper-note-critic** (subagent_type: `general-purpose`, name: `paper-note-critic`): Pass it the project directory path. Instruct it to:
+2. **Researcher-critic** (subagent_type: `general-purpose`, name: `researcher-critic`): This is a **temporary teammate** — shut down after the critique loop. Pass it the project directory path. Instruct it to:
    - Wait for the researcher's `ready_for_review` signal
    - Read the paper (`./paper/`) and the researcher's notes (`./notes/note-01-paper-exploration.md`)
    - Check that notes faithfully reflect the paper — flag missing details, inaccuracies, and missing source references
@@ -36,4 +37,4 @@ Both agents can be spawned in parallel — the critic will wait for the research
 
 **Step 3 — Review**
 
-After receiving `loop_complete`, review the final `note-01-paper-exploration.md` and update task note frontmatter.
+After receiving `loop_complete`, review the final `note-01-paper-exploration.md`, update task note frontmatter, and **shut down researcher-critic only**. The researcher stays alive as a persistent teammate for the rest of the project.

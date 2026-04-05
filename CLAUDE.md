@@ -182,7 +182,9 @@ Teammates are persistent — they stay alive across multiple tasks and phases. O
 
 Phases 1 and 2 use a direct critique loop where teammates communicate without Claude relaying messages.
 
-**Setup**: Claude spawns both the author and critic teammates, giving each the other's name in their prompt. The critic drives the loop.
+**Setup**: Claude ensures both the author and critic know each other's names. The critic drives the loop.
+- **Phase 1**: both researcher (author) and researcher-critic are newly spawned — include peer names in initial spawn prompts
+- **Phase 2**: model-engineer (author) is newly spawned — include researcher's name. Assign the critique task to the already-alive researcher via `SendMessage`
 
 **Protocol**:
 1. Author completes initial work and sends `SendMessage(to: "<critic-name>", message: {type: "ready_for_review"})` with a summary of what was produced
@@ -194,7 +196,7 @@ Phases 1 and 2 use a direct critique loop where teammates communicate without Cl
 5. After acceptance, both teammates update their task note Result sections and call `TaskUpdate(..., status: "completed")`
 6. Critic sends `SendMessage(to: "team-lead", message: {type: "loop_complete"})` to notify Claude
 
-Both tasks stay `in_progress` throughout the loop. Claude waits for the `loop_complete` signal, then reviews the final artifacts, updates task note frontmatter, and shuts down both teammates.
+Both tasks stay `in_progress` throughout the loop. Claude waits for the `loop_complete` signal, then reviews the final artifacts and updates task note frontmatter. Persistent teammates (researcher, model-engineer) stay alive after the loop — only researcher-critic is shut down.
 
 # Notes system
 
@@ -307,9 +309,13 @@ This file is the single source of truth for "why things are the way they are." A
 
 # Phases
 
-The team works through these phases sequentially. Claude assigns tasks to teammates as each phase progresses. Each task follows the lifecycle above unless noted otherwise. For each new session or major phase milestone, Claude creates a diary note (`note-NN-[description].md`) to log progress, observations, and decisions. The first diary note (`note-01-paper-exploration.md`) is written by the researcher teammate in Phase 1.
+The team works through these phases sequentially. Claude assigns tasks to persistent teammates as each phase progresses. Each task follows the lifecycle above unless noted otherwise. For each new session or major phase milestone, Claude creates a diary note (`note-NN-[description].md`) to log progress, observations, and decisions. The first diary note (`note-01-paper-exploration.md`) is written by the researcher teammate in Phase 1.
+
+Teammates spawned in earlier phases remain alive and available for later phases. Claude notifies teammates of newly spawned colleagues via `SendMessage` so they can communicate directly.
 
 ## 1. Paper exploration
+
+**Teammates spawned**: researcher, researcher-critic
 
 `TaskCreate` for "Download and explore paper" and "Critique paper notes", write task notes for each, then:
 
@@ -317,62 +323,83 @@ Spawn a **researcher** teammate who:
 1. Downloads paper source into `./paper/` — prioritize TeX first (via paper-download agent), then HTML, then PDF as last resort
 2. Reads the paper thoroughly (prefer `.tex` files — exact notation, greppable)
 3. Writes structured notes to `./notes/note-01-paper-exploration.md`
-4. Sends `{type: "ready_for_review"}` to the **paper-note-critic** when done
+4. Sends `{type: "ready_for_review"}` to the **researcher-critic** when done
 
-Spawn a **paper-note-critic** teammate (can be spawned in parallel with the researcher) who:
+Spawn a **researcher-critic** teammate (in parallel with the researcher) who:
 1. Waits for the researcher's `ready_for_review` signal
 2. Reads the paper (`./paper/`) and the researcher's notes (`./notes/note-01-paper-exploration.md`)
 3. Checks that notes faithfully reflect the paper — flags missing details, inaccuracies, and missing source references
 4. Runs the direct critique loop with the researcher (max 2 iterations)
 5. Sends `{type: "loop_complete"}` to Claude when done
 
-Claude waits for `loop_complete`, reviews the final note-01, updates task note frontmatter, shuts down both, and git commits.
-From Phase 2 onward, teammates read the paper directly via `./paper/` and refer to the finalized note-01 notes.
+Claude waits for `loop_complete`, reviews the final note-01, updates task note frontmatter, **shuts down researcher-critic** (the only early shutdown), and git commits. The **researcher stays alive** for the rest of the project.
 
 ## 2. Planning
 
+**Teammates spawned**: model-engineer
+**Active from Phase 1**: researcher
+
 `TaskCreate` for "Draft plan" and "Critique plan". Write task notes for each, then:
-Spawn **planner** teammate → reads note-01 + paper → drafts `PLAN.md` → sends `{type: "ready_for_review"}` to the **plan-critic**.
-Spawn **plan-critic** teammate (can be spawned in parallel with the planner) → waits for `ready_for_review` → reads note-01 + paper + `PLAN.md` → runs the direct critique loop with the planner (max 2 iterations) → sends `{type: "loop_complete"}` to Claude.
-Claude waits for `loop_complete`, reviews the final PLAN.md, logs key decisions to decisions.md, updates note frontmatter, shuts down both, and git commits.
+
+Spawn **model-engineer** → reads note-01 + paper → drafts `PLAN.md` → sends `{type: "ready_for_review"}` to the **researcher**.
+
+Assign the critique task to the already-alive **researcher** via `SendMessage`. The researcher acts as plan-critic:
+- Waits for `ready_for_review` from model-engineer
+- Reads note-01 + paper + `PLAN.md` → critiques the plan against the paper
+- Runs the direct critique loop with model-engineer (max 2 iterations)
+- Sends `{type: "loop_complete"}` to Claude when done
+
+Claude waits for `loop_complete`, reviews the final PLAN.md, logs key decisions to decisions.md, updates note frontmatter, and git commits. Both **researcher** and **model-engineer stay alive**.
 
 ## 3. Implementation
 
-Claude reviews the final `PLAN.md` and creates implementation tasks via `TaskCreate`. For each task, follow the task lifecycle described above. Use `addBlockedBy` on `TaskUpdate` to enforce dependency ordering between tasks.
+**Teammates spawned**: data-engineer, training-engineer
+**Active from earlier phases**: researcher, model-engineer
 
-Independent tasks can run in parallel — note that parallel teammates work in the same repo directory, so ensure parallel tasks touch different files to avoid conflicts. Tasks with dependencies list the dependency task notes — teammates read those before starting.
+Claude reviews the final `PLAN.md` and creates implementation tasks via `TaskCreate`. Assign each task to the appropriate persistent teammate:
+- **model-engineer**: model architecture, forward/backward passes, model-specific logic
+- **data-engineer**: data loading, preprocessing, batching, data augmentation
+- **training-engineer**: training loop, optimizer setup, learning rate scheduling, logging, checkpointing
 
-At the end of each implementation task, Claude must ensure the task note frontmatter (status, summary) reflects the final state before committing. Claude shuts down each implementation teammate after reviewing their completed task, then git commits.
+Use `addBlockedBy` on `TaskUpdate` to enforce dependency ordering between tasks. Independent tasks assigned to different teammates can run in parallel — they work in the same repo directory, so ensure parallel tasks touch different files to avoid conflicts.
+
+Teammates can communicate directly to resolve interface questions (e.g., data-engineer asks model-engineer about expected input shapes, training-engineer asks model-engineer about model API). Any teammate can ask the researcher for paper clarifications.
+
+At the end of each implementation task, Claude reviews the result, ensures the task note frontmatter (status, summary) reflects the final state, and git commits.
 
 ## 4. Implementation verification
 
-After implementation, spawn a **verification-engineer** teammate to verify that the code correctly implements the paper before investing time in optimization and training.
+**Teammates spawned**: tester
+**Active from earlier phases**: researcher, model-engineer, data-engineer, training-engineer
 
 1. `TaskCreate` for "Verify implementation correctness", write task note with:
    - Key algorithms, equations, and pseudocode from the paper to check against
    - List of implementation files and their intended purpose from PLAN.md
    - Specific correctness criteria (numerical tolerances, edge cases, invariants)
-2. Spawn **verification-engineer** teammate who:
+2. Spawn **tester** who:
    - Reads the paper (focusing on algorithms, equations, and mathematical details)
    - Reads PLAN.md to understand the intended design
    - Reads the implementation code file by file
    - Checks that each algorithm/equation is faithfully translated from paper to code
+   - **Asks the researcher** directly for clarification on paper details (formulas, edge cases)
    - Identifies bugs, misinterpretations, off-by-one errors, incorrect formulas, wrong tensor dimensions, missing normalizations, etc.
    - Writes and runs targeted correctness tests (e.g., compare against a naive reference implementation, check known input/output pairs from the paper, verify mathematical properties like symmetry or gradient correctness)
-   - Reports findings to Claude via `SendMessage` with a list of issues found and their severity
-3. Claude reviews findings. If bugs are found, Claude creates a fix task for each bug following the standard task lifecycle (`TaskCreate` → write task note → spawn teammate to fix). After each fix teammate completes, Claude shuts them down, then tells the verification-engineer to re-check via `SendMessage`. This loops until all issues are resolved.
-4. Verification-engineer writes final verdict to the task note Result section and marks the task completed via `TaskUpdate`
+   - **Sends bug reports directly to the responsible engineer** (model-engineer, data-engineer, or training-engineer) with specific details and test cases
+3. Engineers fix bugs and notify the tester when done. Tester re-verifies. This loop runs directly between tester and engineers — Claude is notified of progress but doesn't relay messages.
+4. Tester writes final verdict to the task note Result section and marks the task completed via `TaskUpdate`
 
-Claude updates task note frontmatter, logs verification decisions to decisions.md, git commits.
+Claude reviews findings, updates task note frontmatter, logs verification decisions to decisions.md, git commits.
 
 ## 5. Performance optimization
 
-Before the full training/evaluation run, spawn a **performance-engineer** teammate to maximize pipeline throughput. This is an iterative process:
+**Teammates spawned**: performance-engineer
+**Active from earlier phases**: researcher, model-engineer, data-engineer, training-engineer, tester
 
 1. `TaskCreate` for "Optimize performance", write task note with baseline metrics
-2. Spawn **performance-engineer** teammate who runs short profiling iterations (3-4 minutes each)
-3. Each iteration: profile → identify bottleneck → fix → measure improvement → report via `SendMessage`
-4. Claude reviews metrics after each iteration, decides whether to continue or accept
+2. Spawn **performance-engineer** who runs short profiling iterations (3-4 minutes each)
+3. Each iteration: profile → identify bottleneck → fix → measure improvement → report via `SendMessage` to Claude
+4. The performance-engineer can **ask other engineers directly** about their code (e.g., ask data-engineer about data loading, training-engineer about the training loop)
+5. Claude reviews metrics after each iteration, decides whether to continue or accept
 
 Key metrics to track per iteration:
 - CPU utilization
@@ -383,29 +410,34 @@ Key metrics to track per iteration:
 - Evaluation time per step
 - Data loading time per step
 
-The teammate persists across iterations. Claude decides when performance is good enough and tells the performance-engineer to wrap up (write final metrics to task note, mark completed). Claude shuts them down, updates task note frontmatter, logs decisions to decisions.md, git commits.
+Claude decides when performance is good enough and tells the performance-engineer to wrap up (write final metrics to task note, mark completed). Claude updates task note frontmatter, logs decisions to decisions.md, git commits.
 
 ## 6. Full training & monitoring
 
-After performance optimization, run the full training pipeline with a dedicated **training-monitor** teammate watching for issues.
+**Teammates spawned**: none (training-engineer already alive)
+**Active from earlier phases**: researcher, model-engineer, data-engineer, training-engineer, performance-engineer, tester
 
-1. `TaskCreate` for "Run full training with monitoring", write task note with:
+The **training-engineer** runs the full training — they built the pipeline, so they know it best. No separate training-monitor is needed.
+
+1. `TaskCreate` for "Run full training with monitoring", assign to **training-engineer** via `SendMessage`. Task note includes:
    - Training configuration (hyperparameters, dataset, expected duration)
    - Success criteria (target loss, convergence expectations from paper)
    - Known risks (OOM, divergence, slow convergence)
    - Pre-authorized emergency actions: restart from checkpoint on NaN/Inf loss, reduce learning rate on loss spikes, increase gradient clipping on gradient explosion
-2. Spawn **training-monitor** teammate who:
+2. Training-engineer:
    - Launches the full training run
    - Watches training logs in real-time (loss curves, gradient norms, learning rates)
    - Detects anomalies: NaN/Inf losses, gradient explosion/vanishing, sudden loss spikes, OOM errors
    - Applies the pre-authorized emergency fixes without waiting for Claude. Reports each fix to Claude immediately after applying it.
+   - Can **ask the researcher** about expected convergence behavior from the paper
+   - Can **ask the performance-engineer** about performance-related anomalies
    - Escalates to Claude via `SendMessage` for decisions outside the pre-authorized scope (e.g., changing architecture, stopping training early, switching datasets)
    - Ensures checkpoints are saved at appropriate intervals
    - Reports to Claude periodically with status updates
-3. Claude reviews reports, logs the monitor's autonomous fixes to decisions.md, and decides whether to intervene further or let the monitor continue
-4. When training completes, training-monitor writes final metrics to the task note Result section and marks the task completed via `TaskUpdate`
+3. Claude reviews reports, logs the training-engineer's autonomous fixes to decisions.md, and decides whether to intervene further
+4. When training completes, training-engineer writes final metrics to the task note Result section and marks the task completed via `TaskUpdate`
 
-Key metrics the training-monitor tracks:
+Key metrics the training-engineer tracks:
 - Training loss (per step and smoothed)
 - Validation loss / metrics (per evaluation interval)
 - Learning rate schedule
@@ -414,21 +446,26 @@ Key metrics the training-monitor tracks:
 - Training throughput (samples/sec, steps/sec)
 - Checkpoint status
 
-The training-monitor persists for the duration of the run. Claude shuts them down after training completes, logs decisions to decisions.md, updates note frontmatter, git commits.
+Claude updates task note frontmatter, logs decisions to decisions.md, git commits.
 
 ## 7. Results verification
 
+**Teammates spawned**: eval-engineer
+**Active from earlier phases**: researcher, model-engineer, data-engineer, training-engineer, performance-engineer, tester
+
 1. `TaskCreate` for "Verify results against paper", write task note with specific paper claims to verify (tables, figures, metrics)
-2. Spawn **results-verifier** teammate who:
+2. Spawn **eval-engineer** who:
    - Reads the paper (focusing on claimed results: tables, figures, speedups, accuracy numbers)
    - Reads training outputs and logs from Phase 6
+   - **Asks the researcher** about specific paper claims and how to interpret them
+   - **Asks the training-engineer** about training details and where to find logs/checkpoints
    - Runs additional benchmarks if needed
    - Compares results against paper's specific claims
    - Fills in the task note Result section
    - Marks the task completed via `TaskUpdate`
 3. Claude reviews findings, writes the session diary note, updates note frontmatter, git commits
 
-After all phases are complete, shut down any remaining active teammates via `SendMessage` with `{type: "shutdown_request"}`, wait for each `shutdown_response`, and call `TeamDelete` to clean up.
+After all phases are complete, shut down all remaining persistent teammates (researcher, model-engineer, data-engineer, training-engineer, performance-engineer, tester, eval-engineer) via `SendMessage` with `{type: "shutdown_request"}`, wait for each `shutdown_response`, and call `TeamDelete` to clean up.
 
 # Task notes
 
@@ -489,42 +526,55 @@ User: "Implement the FlashAttention-2 paper (2307.08691)"
    - Create ./notes/decisions.md (with frontmatter)
    - TeamCreate: team_name="flash-attention-2"
 
-1. Paper exploration
-   - TaskCreate + write task notes for "Download and explore paper", "Critique paper notes"
-   - Spawn "researcher" + "paper-note-critic" (critic given researcher's name and vice versa)
+1. Paper exploration [spawn: researcher, researcher-critic]
+   - TaskCreate + write task notes
+   - Spawn "researcher" + "researcher-critic" in parallel
    - researcher downloads paper, writes note-01, signals critic directly
-   - researcher ↔ paper-note-critic loop runs autonomously (max 2 iterations)
-   - Critic signals Claude "loop_complete" → Claude reviews, shuts down both
+   - researcher ↔ researcher-critic loop (max 2 iterations)
+   - Critic signals "loop_complete" → Claude shuts down critic only
+   - researcher stays alive ✓
 
-2. Planning
-   - TaskCreate + write task notes for "Draft plan", "Critique plan"
-   - Spawn "planner" + "plan-critic" (each given the other's name)
-   - planner drafts PLAN.md, signals plan-critic directly
-   - planner ↔ plan-critic loop runs autonomously (max 2 iterations)
-   - Critic signals Claude "loop_complete" → Claude reviews, shuts down both
+2. Planning [spawn: model-engineer]
+   - TaskCreate + write task notes
+   - Spawn "model-engineer" → drafts PLAN.md, signals researcher
+   - Assign critique task to researcher (already alive) via SendMessage
+   - model-engineer ↔ researcher loop (max 2 iterations)
+   - Researcher signals "loop_complete" → Claude reviews
+   - researcher + model-engineer stay alive ✓
 
-3. Implementation
-   - TaskCreate per PLAN.md task, write task notes
-   - Parallel: spawn "forward-dev" + "backward-dev" (independent files)
-   - Sequential: spawn "benchmarker" (depends on both kernels)
-   - Review each, shut down, update frontmatter, git commit
+3. Implementation [spawn: data-engineer, training-engineer]
+   - TaskCreate per PLAN.md task, assign to appropriate engineer
+   - model-engineer: attention kernels (forward + backward)
+   - data-engineer: data loading, batching
+   - training-engineer: training loop, logging
+   - Engineers talk directly for interface questions
+   - Any engineer asks researcher for paper clarifications
+   - Claude reviews each completed task, git commits
 
-4. Implementation verification
-   - Spawn "verification-engineer" → reads paper + code, checks correctness
-   - If bugs found: spawn fix teammate → fix → re-verify (loop until clean)
-   - Shut down, git commit
+4. Implementation verification [spawn: tester]
+   - TaskCreate, spawn "tester"
+   - tester reads paper + code, asks researcher about formulas
+   - tester sends bugs directly to responsible engineer
+   - engineer fixes → tester re-verifies (direct loop)
+   - All engineers + tester stay alive ✓
 
-5. Performance optimization
-   - Spawn "performance-engineer" → iterative profile-fix-measure cycles
-   - Claude reviews metrics each iteration, decides when to stop
-   - Shut down, git commit
+5. Performance optimization [spawn: performance-engineer]
+   - TaskCreate, spawn "performance-engineer"
+   - Iterative profile-fix-measure cycles
+   - performance-engineer asks other engineers about their code
+   - Claude reviews metrics, decides when to stop
 
-6. Full training & monitoring
-   - Spawn "training-monitor" → runs training, watches for anomalies
-   - Pre-authorized fixes applied autonomously, other issues escalated
-   - Shut down after completion, git commit
+6. Full training & monitoring [no new spawns]
+   - Assign training task to training-engineer via SendMessage
+   - training-engineer runs training, monitors anomalies
+   - Pre-authorized fixes applied autonomously
+   - Asks researcher about expected convergence
+   - Claude reviews periodic reports
 
-7. Results verification
-   - Spawn "results-verifier" → compares outputs against paper claims
-   - Shut down, TeamDelete, done
+7. Results verification [spawn: eval-engineer]
+   - TaskCreate, spawn "eval-engineer"
+   - eval-engineer asks researcher about paper claims
+   - eval-engineer asks training-engineer about logs
+   - Compares results against paper
+   - Claude reviews → shut down ALL teammates → TeamDelete → done
 ```
