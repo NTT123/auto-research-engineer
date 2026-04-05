@@ -4,8 +4,12 @@ A Claude Code setup that implements ML papers from arxiv. Give it a paper, and i
 
 ## Usage
 
-```
-tmux new-session claude --dangerously-skip-permissions --settings-sources project "implement 2307.08691"
+```bash
+# Install tmux first if needed:
+# macOS: brew install tmux
+# Ubuntu/Debian: sudo apt install tmux
+
+tmux new-session claude --dangerously-skip-permissions --setting-sources project "implement 2307.08691"
 ```
 
 Or paste an arxiv URL or describe a paper. Claude handles the rest. tmux is required for agent teams to work.
